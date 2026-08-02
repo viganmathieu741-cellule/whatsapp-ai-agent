@@ -1,26 +1,28 @@
 require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
+const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
 app.use(express.json());
 
 // ==================== CONFIGURATION ====================
 const PORT = process.env.PORT || 3000;
-const VERIFY_TOKEN = process.env.VERIFY_TOKEN; // Ton mot de passe inventé (ex: smartauto2026)
-const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN; // Token d'accès Meta
-const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID; // Ton Phone Number ID
-const GROQ_API_KEY = process.env.GROQ_API_KEY; // Clé API Groq
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
+const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
+const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
+const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const GRAPH_API_VERSION = 'v20.0';
 
+// Connexion Supabase
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+
 // Mémoire de conversation simple (en RAM). Se réinitialise si le serveur redémarre.
-// Structure: { "22990xxxxxx": [{role: "user", content: "..."}, {role: "assistant", content: "..."}] }
 const conversationHistory = {};
 
-// Pour éviter de traiter deux fois le même message (WhatsApp peut renvoyer le même webhook)
+// Pour éviter de traiter deux fois le même message
 const processedMessageIds = new Set();
 
-// Le "personnage" de ton agent - à personnaliser selon ton business
 const SYSTEM_PROMPT = `Tu es l'assistant virtuel de SMART AUTOMATION, une entreprise basée au Bénin
 qui propose des services de consulting en automatisation IA pour les entreprises
 (agents IA, automatisation de workflows, chatbots, etc.).
@@ -37,7 +39,6 @@ Ton rôle :
 Reste toujours poli, professionnel, et évite les réponses trop longues (max 3-4 phrases).`;
 
 // ==================== ROUTE DE VÉRIFICATION (GET) ====================
-// Meta appelle cette route une seule fois pour vérifier que le webhook t'appartient
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
@@ -54,7 +55,6 @@ app.get('/webhook', (req, res) => {
 
 // ==================== ROUTE DE RÉCEPTION DES MESSAGES (POST) ====================
 app.post('/webhook', async (req, res) => {
-  // Répondre immédiatement à Meta (sinon il renvoie le webhook en boucle)
   res.sendStatus(200);
 
   try {
@@ -64,17 +64,15 @@ app.post('/webhook', async (req, res) => {
     const message = value?.messages?.[0];
 
     if (!message) {
-      // Ce n'est pas un nouveau message (ex: accusé de lecture), on ignore
       return;
     }
 
-    // Éviter de traiter deux fois le même message
     if (processedMessageIds.has(message.id)) {
       return;
     }
     processedMessageIds.add(message.id);
 
-    const from = message.from; // Numéro de l'expéditeur
+    const from = message.from;
     const messageType = message.type;
 
     if (messageType !== 'text') {
@@ -85,10 +83,12 @@ app.post('/webhook', async (req, res) => {
     const userText = message.text.body;
     console.log(`📩 Message reçu de ${from}: ${userText}`);
 
-    // Générer la réponse via Groq
+    await saveMessage(from, 'client', userText);
+
     const aiResponse = await generateAIResponse(from, userText);
 
-    // Envoyer la réponse sur WhatsApp
+    await saveMessage(from, 'agent_ia', aiResponse);
+
     await sendWhatsAppMessage(from, aiResponse);
 
   } catch (error) {
@@ -96,16 +96,28 @@ app.post('/webhook', async (req, res) => {
   }
 });
 
+// ==================== SAUVEGARDE DANS SUPABASE ====================
+async function saveMessage(phoneNumber, sender, message) {
+  try {
+    await supabase.from('messages').insert({
+      phone_number: phoneNumber,
+      sender: sender,
+      message: message,
+      conversation_id: phoneNumber
+    });
+  } catch (error) {
+    console.error('Erreur sauvegarde Supabase:', error.message);
+  }
+}
+
 // ==================== GÉNÉRATION DE RÉPONSE VIA GROQ ====================
 async function generateAIResponse(userId, userMessage) {
   if (!conversationHistory[userId]) {
     conversationHistory[userId] = [];
   }
 
-  // Ajouter le message de l'utilisateur à l'historique
   conversationHistory[userId].push({ role: 'user', content: userMessage });
 
-  // Garder seulement les 10 derniers messages pour ne pas surcharger le contexte
   const recentHistory = conversationHistory[userId].slice(-10);
 
   try {
@@ -130,7 +142,6 @@ async function generateAIResponse(userId, userMessage) {
 
     const aiText = response.data.choices[0].message.content;
 
-    // Sauvegarder la réponse dans l'historique
     conversationHistory[userId].push({ role: 'assistant', content: aiText });
 
     return aiText;
@@ -165,7 +176,7 @@ async function sendWhatsAppMessage(to, text) {
   }
 }
 
-// ==================== ROUTE DE SANTÉ (pour vérifier que le serveur tourne) ====================
+// ==================== ROUTE DE SANTÉ ====================
 app.get('/', (req, res) => {
   res.send('🤖 Agent WhatsApp SMART AUTOMATION - En ligne');
 });
