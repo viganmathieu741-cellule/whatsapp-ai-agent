@@ -154,7 +154,7 @@ async function generateAIResponse(companyId, userId, userMessage) {
     .eq('company_id', companyId)
     .eq('conversation_id', userId)
     .order('created_at', { ascending: false })
-    .limit(10);
+    .limit(20);
 
   if (error) {
     console.error('Erreur lecture historique Supabase:', error.message);
