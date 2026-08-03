@@ -20,9 +20,6 @@ let companiesCache = {};
 let lastCacheRefresh = 0;
 const CACHE_DURATION_MS = 60000; // rafraîchit le cache toutes les 60s
 
-// Mémoire de conversation simple (en RAM)
-const conversationHistory = {};
-
 // Pour éviter de traiter deux fois le même message
 const processedMessageIds = new Set();
 
@@ -122,7 +119,7 @@ app.post('/webhook', async (req, res) => {
 
     await saveMessage(company.id, from, 'client', userText);
 
-    const aiResponse = await generateAIResponse(from, userText);
+    const aiResponse = await generateAIResponse(company.id, from, userText);
 
     await saveMessage(company.id, from, 'agent_ia', aiResponse);
 
@@ -148,15 +145,31 @@ async function saveMessage(companyId, phoneNumber, sender, message) {
   }
 }
 
-// ==================== GÉNÉRATION DE RÉPONSE VIA GROQ ====================
-async function generateAIResponse(userId, userMessage) {
-  if (!conversationHistory[userId]) {
-    conversationHistory[userId] = [];
+// ==================== GÉNÉRATION DE RÉPONSE VIA GROQ (mémoire persistante via Supabase) ====================
+async function generateAIResponse(companyId, userId, userMessage) {
+  // Récupérer les 10 derniers messages de cette conversation depuis Supabase
+  const { data: history, error } = await supabase
+    .from('messages')
+    .select('sender, message')
+    .eq('company_id', companyId)
+    .eq('conversation_id', userId)
+    .order('created_at', { ascending: false })
+    .limit(10);
+
+  if (error) {
+    console.error('Erreur lecture historique Supabase:', error.message);
   }
 
-  conversationHistory[userId].push({ role: 'user', content: userMessage });
+  // Remettre dans l'ordre chronologique et convertir au format attendu par Groq
+  const recentHistory = (history || [])
+    .reverse()
+    .map(m => ({
+      role: m.sender === 'client' ? 'user' : 'assistant',
+      content: m.message
+    }));
 
-  const recentHistory = conversationHistory[userId].slice(-10);
+  // Ajouter le nouveau message de l'utilisateur
+  recentHistory.push({ role: 'user', content: userMessage });
 
   try {
     const response = await axios.post(
@@ -178,11 +191,7 @@ async function generateAIResponse(userId, userMessage) {
       }
     );
 
-    const aiText = response.data.choices[0].message.content;
-
-    conversationHistory[userId].push({ role: 'assistant', content: aiText });
-
-    return aiText;
+    return response.data.choices[0].message.content;
 
   } catch (error) {
     console.error('Erreur Groq:', error.response?.data || error.message);
@@ -216,7 +225,7 @@ async function sendWhatsAppMessage(company, to, text) {
 
 // ==================== ROUTE DE SANTÉ ====================
 app.get('/', (req, res) => {
-  res.send('🤖 Agent WhatsApp SMART AUTOMATION - En ligne (multi-clients)');
+  res.send('🤖 Agent WhatsApp SMART AUTOMATION - En ligne (multi-clients, mémoire persistante)');
 });
 
 app.listen(PORT, () => {
