@@ -9,15 +9,18 @@ app.use(express.json());
 // ==================== CONFIGURATION ====================
 const PORT = process.env.PORT || 3000;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
-const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
-const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
-const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const GRAPH_API_VERSION = 'v20.0';
+const GROQ_API_KEY = process.env.GROQ_API_KEY;
 
 // Connexion Supabase
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
-// Mémoire de conversation simple (en RAM). Se réinitialise si le serveur redémarre.
+// Cache en mémoire des entreprises (pour éviter de requêter Supabase à chaque message)
+let companiesCache = {};
+let lastCacheRefresh = 0;
+const CACHE_DURATION_MS = 60000; // rafraîchit le cache toutes les 60s
+
+// Mémoire de conversation simple (en RAM)
 const conversationHistory = {};
 
 // Pour éviter de traiter deux fois le même message
@@ -37,6 +40,31 @@ Ton rôle :
   en contact avec un humain
 
 Reste toujours poli, professionnel, et évite les réponses trop longues (max 3-4 phrases).`;
+
+// ==================== CHARGER LES ENTREPRISES DEPUIS SUPABASE ====================
+async function refreshCompaniesCache() {
+  try {
+    const { data, error } = await supabase.from('companies').select('*');
+    if (error) throw error;
+
+    const newCache = {};
+    for (const company of data) {
+      newCache[company.whatsapp_phone_number_id] = company;
+    }
+    companiesCache = newCache;
+    lastCacheRefresh = Date.now();
+    console.log(`🔄 Cache entreprises rafraîchi (${data.length} entreprise(s))`);
+  } catch (error) {
+    console.error('Erreur chargement companies:', error.message);
+  }
+}
+
+async function getCompanyByPhoneNumberId(phoneNumberId) {
+  if (Date.now() - lastCacheRefresh > CACHE_DURATION_MS) {
+    await refreshCompaniesCache();
+  }
+  return companiesCache[phoneNumberId] || null;
+}
 
 // ==================== ROUTE DE VÉRIFICATION (GET) ====================
 app.get('/webhook', (req, res) => {
@@ -62,6 +90,7 @@ app.post('/webhook', async (req, res) => {
     const change = entry?.changes?.[0];
     const value = change?.value;
     const message = value?.messages?.[0];
+    const phoneNumberId = value?.metadata?.phone_number_id;
 
     if (!message) {
       return;
@@ -72,24 +101,32 @@ app.post('/webhook', async (req, res) => {
     }
     processedMessageIds.add(message.id);
 
+    // Identifier l'entreprise correspondant à ce numéro WhatsApp
+    const company = await getCompanyByPhoneNumberId(phoneNumberId);
+
+    if (!company) {
+      console.error(`⚠️ Aucune entreprise trouvée pour phone_number_id: ${phoneNumberId}`);
+      return;
+    }
+
     const from = message.from;
     const messageType = message.type;
 
     if (messageType !== 'text') {
-      await sendWhatsAppMessage(from, "Je ne peux traiter que des messages texte pour le moment 🙏");
+      await sendWhatsAppMessage(company, from, "Je ne peux traiter que des messages texte pour le moment 🙏");
       return;
     }
 
     const userText = message.text.body;
-    console.log(`📩 Message reçu de ${from}: ${userText}`);
+    console.log(`📩 [${company.name}] Message reçu de ${from}: ${userText}`);
 
-    await saveMessage(from, 'client', userText);
+    await saveMessage(company.id, from, 'client', userText);
 
     const aiResponse = await generateAIResponse(from, userText);
 
-    await saveMessage(from, 'agent_ia', aiResponse);
+    await saveMessage(company.id, from, 'agent_ia', aiResponse);
 
-    await sendWhatsAppMessage(from, aiResponse);
+    await sendWhatsAppMessage(company, from, aiResponse);
 
   } catch (error) {
     console.error('Erreur lors du traitement du webhook:', error.response?.data || error.message);
@@ -97,9 +134,10 @@ app.post('/webhook', async (req, res) => {
 });
 
 // ==================== SAUVEGARDE DANS SUPABASE ====================
-async function saveMessage(phoneNumber, sender, message) {
+async function saveMessage(companyId, phoneNumber, sender, message) {
   try {
     await supabase.from('messages').insert({
+      company_id: companyId,
       phone_number: phoneNumber,
       sender: sender,
       message: message,
@@ -153,10 +191,10 @@ async function generateAIResponse(userId, userMessage) {
 }
 
 // ==================== ENVOI DE MESSAGE WHATSAPP ====================
-async function sendWhatsAppMessage(to, text) {
+async function sendWhatsAppMessage(company, to, text) {
   try {
     await axios.post(
-      `https://graph.facebook.com/${GRAPH_API_VERSION}/${PHONE_NUMBER_ID}/messages`,
+      `https://graph.facebook.com/${GRAPH_API_VERSION}/${company.whatsapp_phone_number_id}/messages`,
       {
         messaging_product: 'whatsapp',
         to: to,
@@ -165,12 +203,12 @@ async function sendWhatsAppMessage(to, text) {
       },
       {
         headers: {
-          'Authorization': `Bearer ${WHATSAPP_TOKEN}`,
+          'Authorization': `Bearer ${company.whatsapp_token}`,
           'Content-Type': 'application/json'
         }
       }
     );
-    console.log(`📤 Réponse envoyée à ${to}`);
+    console.log(`📤 [${company.name}] Réponse envoyée à ${to}`);
   } catch (error) {
     console.error('Erreur envoi WhatsApp:', error.response?.data || error.message);
   }
@@ -178,9 +216,10 @@ async function sendWhatsAppMessage(to, text) {
 
 // ==================== ROUTE DE SANTÉ ====================
 app.get('/', (req, res) => {
-  res.send('🤖 Agent WhatsApp SMART AUTOMATION - En ligne');
+  res.send('🤖 Agent WhatsApp SMART AUTOMATION - En ligne (multi-clients)');
 });
 
 app.listen(PORT, () => {
   console.log(`🚀 Serveur démarré sur le port ${PORT}`);
+  refreshCompaniesCache(); // charge les entreprises au démarrage
 });
