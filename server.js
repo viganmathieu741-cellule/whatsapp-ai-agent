@@ -122,6 +122,37 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
+// ==================== ROUTE TEMPORAIRE : DÉFINIR UN MOT DE PASSE PROPREMENT (à supprimer après usage) ====================
+app.post('/api/admin/set-password', async (req, res) => {
+  try {
+    const { email, newPassword, setupSecret } = req.body;
+
+    if (setupSecret !== VERIFY_TOKEN) {
+      return res.status(403).json({ error: 'Non autorisé' });
+    }
+
+    if (!email || !newPassword) {
+      return res.status(400).json({ error: 'email et newPassword requis' });
+    }
+
+    const hash = await bcrypt.hash(newPassword, 10);
+
+    const { error } = await supabase
+      .from('companies')
+      .update({ password_hash: hash })
+      .eq('email', email);
+
+    if (error) throw error;
+
+    console.log(`🔐 Mot de passe mis à jour pour ${email}`);
+    res.json({ success: true, message: 'Mot de passe mis à jour' });
+
+  } catch (error) {
+    console.error('Erreur set-password:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ==================== ROUTE : LISTE DES CONVERSATIONS (groupées par numéro client) ====================
 app.get('/api/conversations', authMiddleware, async (req, res) => {
   try {
