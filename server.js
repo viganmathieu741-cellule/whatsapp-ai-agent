@@ -17,15 +17,12 @@ const GRAPH_API_VERSION = 'v20.0';
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const JWT_SECRET = process.env.JWT_SECRET;
 
-// Connexion Supabase
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
-// Cache en mémoire des entreprises
 let companiesCache = {};
 let lastCacheRefresh = 0;
 const CACHE_DURATION_MS = 60000;
 
-// Pour éviter de traiter deux fois le même message
 const processedMessageIds = new Set();
 
 // ==================== CHARGER LES ENTREPRISES DEPUIS SUPABASE ====================
@@ -71,7 +68,7 @@ function authMiddleware(req, res, next) {
   }
 }
 
-// ==================== ROUTE DE CONNEXION AU DASHBOARD (avec logs de debug) ====================
+// ==================== ROUTE DE CONNEXION AU DASHBOARD ====================
 app.post('/api/login', async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -123,9 +120,9 @@ app.post('/api/login', async (req, res) => {
 });
 
 // ==================== ROUTE TEMPORAIRE : DÉFINIR UN MOT DE PASSE PROPREMENT (à supprimer après usage) ====================
-app.post('/api/admin/set-password', async (req, res) => {
+app.get('/api/admin/set-password', async (req, res) => {
   try {
-    const { email, newPassword, setupSecret } = req.body;
+    const { email, newPassword, setupSecret } = req.query;
 
     if (setupSecret !== VERIFY_TOKEN) {
       return res.status(403).json({ error: 'Non autorisé' });
@@ -145,7 +142,7 @@ app.post('/api/admin/set-password', async (req, res) => {
     if (error) throw error;
 
     console.log(`🔐 Mot de passe mis à jour pour ${email}`);
-    res.json({ success: true, message: 'Mot de passe mis à jour' });
+    res.json({ success: true, message: 'Mot de passe mis à jour', hashPreview: hash.substring(0, 15) + '...' });
 
   } catch (error) {
     console.error('Erreur set-password:', error.message);
@@ -153,7 +150,7 @@ app.post('/api/admin/set-password', async (req, res) => {
   }
 });
 
-// ==================== ROUTE : LISTE DES CONVERSATIONS (groupées par numéro client) ====================
+// ==================== ROUTE : LISTE DES CONVERSATIONS ====================
 app.get('/api/conversations', authMiddleware, async (req, res) => {
   try {
     const { data, error } = await supabase
