@@ -23,21 +23,6 @@ const CACHE_DURATION_MS = 60000; // rafraîchit le cache toutes les 60s
 // Pour éviter de traiter deux fois le même message
 const processedMessageIds = new Set();
 
-const SYSTEM_PROMPT = `Tu es l'assistant virtuel de SMART AUTOMATION, une entreprise basée au Bénin
-qui propose des services de consulting en automatisation IA pour les entreprises
-(agents IA, automatisation de workflows, chatbots, etc.).
-
-Ton rôle :
-- Répondre aux questions des prospects et clients de façon professionnelle et chaleureuse
-- Présenter les services de SMART AUTOMATION quand c'est pertinent
-- Collecter les besoins du client (quel processus veut-il automatiser ?)
-- Rediriger vers une prise de rendez-vous ou un devis si le client est intéressé
-- Répondre en français, de façon concise (messages WhatsApp courts)
-- Si tu ne sais pas répondre à une question technique précise, propose de mettre le client
-  en contact avec un humain
-
-Reste toujours poli, professionnel, et évite les réponses trop longues (max 3-4 phrases).`;
-
 // ==================== CHARGER LES ENTREPRISES DEPUIS SUPABASE ====================
 async function refreshCompaniesCache() {
   try {
@@ -119,7 +104,7 @@ app.post('/webhook', async (req, res) => {
 
     await saveMessage(company.id, from, 'client', userText);
 
-    const aiResponse = await generateAIResponse(company.id, from, userText);
+    const aiResponse = await generateAIResponse(company, from, userText);
 
     await saveMessage(company.id, from, 'agent_ia', aiResponse);
 
@@ -145,13 +130,13 @@ async function saveMessage(companyId, phoneNumber, sender, message) {
   }
 }
 
-// ==================== GÉNÉRATION DE RÉPONSE VIA GROQ (mémoire persistante via Supabase) ====================
-async function generateAIResponse(companyId, userId, userMessage) {
-  // Récupérer les 10 derniers messages de cette conversation depuis Supabase
+// ==================== GÉNÉRATION DE RÉPONSE VIA GROQ (mémoire persistante + prompt par entreprise) ====================
+async function generateAIResponse(company, userId, userMessage) {
+  // Récupérer les 20 derniers messages de cette conversation depuis Supabase
   const { data: history, error } = await supabase
     .from('messages')
     .select('sender, message')
-    .eq('company_id', companyId)
+    .eq('company_id', company.id)
     .eq('conversation_id', userId)
     .order('created_at', { ascending: false })
     .limit(20);
@@ -171,13 +156,17 @@ async function generateAIResponse(companyId, userId, userMessage) {
   // Ajouter le nouveau message de l'utilisateur
   recentHistory.push({ role: 'user', content: userMessage });
 
+  // Prompt personnalisé de l'entreprise, avec valeur de secours si non défini
+  const systemPrompt = company.business_prompt ||
+    `Tu es l'assistant virtuel de ${company.name}. Réponds en français, de façon concise et professionnelle.`;
+
   try {
     const response = await axios.post(
       'https://api.groq.com/openai/v1/chat/completions',
       {
         model: 'llama-3.3-70b-versatile',
         messages: [
-          { role: 'system', content: SYSTEM_PROMPT },
+          { role: 'system', content: systemPrompt },
           ...recentHistory
         ],
         temperature: 0.7,
@@ -225,7 +214,7 @@ async function sendWhatsAppMessage(company, to, text) {
 
 // ==================== ROUTE DE SANTÉ ====================
 app.get('/', (req, res) => {
-  res.send('🤖 Agent WhatsApp SMART AUTOMATION - En ligne (multi-clients, mémoire persistante)');
+  res.send('🤖 Agent WhatsApp SMART AUTOMATION - En ligne (multi-clients, mémoire persistante, prompts personnalisés)');
 });
 
 app.listen(PORT, () => {
