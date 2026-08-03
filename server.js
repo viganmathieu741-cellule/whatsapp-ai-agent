@@ -71,10 +71,11 @@ function authMiddleware(req, res, next) {
   }
 }
 
-// ==================== ROUTE DE CONNEXION AU DASHBOARD ====================
+// ==================== ROUTE DE CONNEXION AU DASHBOARD (avec logs de debug) ====================
 app.post('/api/login', async (req, res) => {
   try {
     const { email, password } = req.body;
+    console.log('🔍 Tentative de connexion pour email:', JSON.stringify(email));
 
     if (!email || !password) {
       return res.status(400).json({ error: 'Email et mot de passe requis' });
@@ -87,14 +88,18 @@ app.post('/api/login', async (req, res) => {
       .single();
 
     if (error || !company) {
+      console.log('❌ Entreprise non trouvée pour cet email. Erreur Supabase:', error?.message);
       return res.status(401).json({ error: 'Email ou mot de passe incorrect' });
     }
+
+    console.log('✅ Entreprise trouvée:', company.name, '| hash présent:', !!company.password_hash);
 
     if (!company.password_hash) {
       return res.status(401).json({ error: 'Compte non configuré. Contactez SMART AUTOMATION.' });
     }
 
     const passwordMatch = await bcrypt.compare(password, company.password_hash);
+    console.log('🔑 Résultat comparaison mot de passe:', passwordMatch);
 
     if (!passwordMatch) {
       return res.status(401).json({ error: 'Email ou mot de passe incorrect' });
@@ -128,7 +133,6 @@ app.get('/api/conversations', authMiddleware, async (req, res) => {
 
     if (error) throw error;
 
-    // Grouper par conversation_id, garder le dernier message de chaque conversation
     const conversationsMap = {};
     for (const msg of data) {
       if (!conversationsMap[msg.conversation_id]) {
