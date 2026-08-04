@@ -72,7 +72,6 @@ function authMiddleware(req, res, next) {
 app.post('/api/login', async (req, res) => {
   try {
     const { email, password } = req.body;
-    console.log('🔍 Tentative de connexion pour email:', JSON.stringify(email));
 
     if (!email || !password) {
       return res.status(400).json({ error: 'Email et mot de passe requis' });
@@ -85,18 +84,14 @@ app.post('/api/login', async (req, res) => {
       .single();
 
     if (error || !company) {
-      console.log('❌ Entreprise non trouvée pour cet email. Erreur Supabase:', error?.message);
       return res.status(401).json({ error: 'Email ou mot de passe incorrect' });
     }
-
-    console.log('✅ Entreprise trouvée:', company.name, '| hash présent:', !!company.password_hash);
 
     if (!company.password_hash) {
       return res.status(401).json({ error: 'Compte non configuré. Contactez SMART AUTOMATION.' });
     }
 
     const passwordMatch = await bcrypt.compare(password, company.password_hash);
-    console.log('🔑 Résultat comparaison mot de passe:', passwordMatch);
 
     if (!passwordMatch) {
       return res.status(401).json({ error: 'Email ou mot de passe incorrect' });
@@ -116,37 +111,6 @@ app.post('/api/login', async (req, res) => {
   } catch (error) {
     console.error('Erreur login:', error.message);
     res.status(500).json({ error: 'Erreur serveur' });
-  }
-});
-
-// ==================== ROUTE TEMPORAIRE : DÉFINIR UN MOT DE PASSE PROPREMENT (à supprimer après usage) ====================
-app.get('/api/admin/set-password', async (req, res) => {
-  try {
-    const { email, newPassword, setupSecret } = req.query;
-
-    if (setupSecret !== VERIFY_TOKEN) {
-      return res.status(403).json({ error: 'Non autorisé' });
-    }
-
-    if (!email || !newPassword) {
-      return res.status(400).json({ error: 'email et newPassword requis' });
-    }
-
-    const hash = await bcrypt.hash(newPassword, 10);
-
-    const { error } = await supabase
-      .from('companies')
-      .update({ password_hash: hash })
-      .eq('email', email);
-
-    if (error) throw error;
-
-    console.log(`🔐 Mot de passe mis à jour pour ${email}`);
-    res.json({ success: true, message: 'Mot de passe mis à jour', hashPreview: hash.substring(0, 15) + '...' });
-
-  } catch (error) {
-    console.error('Erreur set-password:', error.message);
-    res.status(500).json({ error: error.message });
   }
 });
 
@@ -363,7 +327,7 @@ async function sendWhatsAppMessage(company, to, text) {
 
 // ==================== ROUTE DE SANTÉ ====================
 app.get('/', (req, res) => {
-  res.send('🤖 Agent WhatsApp SMART AUTOMATION - En ligne (multi-clients, mémoire persistante, dashboard API)');
+  res.send('🤖 Agent WhatsApp SMART AUTOMATION - En ligne (multi-clients, mémoire persistante, dashboard sécurisé)');
 });
 
 app.listen(PORT, () => {
