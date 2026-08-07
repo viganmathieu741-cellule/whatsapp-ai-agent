@@ -50,7 +50,79 @@ async function getCompanyByPhoneNumberId(phoneNumberId) {
   return companiesCache[phoneNumberId] || null;
 }
 
-// ==================== MIDDLEWARE D'AUTHENTIFICATION (pour le dashboard) ====================
+// ==================== RECHERCHE RAG SUPABASE (STANDARD & PREMIUM) ====================
+async function getRagContext(companyId, queryText) {
+  try {
+    // Si tu utilises des embeddings Supabase pgvector avec la fonction RPC match_documents
+    const { data: docs, error } = await supabase.rpc('match_documents', {
+      query_text: queryText,
+      match_count: 3,
+      filter_company_id: companyId
+    });
+
+    if (error || !docs || docs.length === 0) {
+      // Fallback simple si la RPC n'est pas configurée : recherche textuelle basique
+      const { data: fallbackDocs } = await supabase
+        .from('documents')
+        .select('content')
+        .eq('company_id', companyId)
+        .limit(3);
+
+      return fallbackDocs ? fallbackDocs.map(d => d.content).join('\n---\n') : '';
+    }
+
+    return docs.map(d => d.content).join('\n---\n');
+  } catch (err) {
+    console.error('Erreur récupération RAG:', err.message);
+    return '';
+  }
+}
+
+// ==================== OUTILS EXÉCUTABLES (PREMIUM / PRO) ====================
+const premiumTools = [
+  {
+    type: 'function',
+    function: {
+      name: 'save_lead_info',
+      description: 'Enregistre les informations de contact ou de besoin fournies par le prospect',
+      parameters: {
+        type: 'object',
+        properties: {
+          client_name: { type: 'string', description: 'Nom ou prénom du client' },
+          email: { type: 'string', description: 'Adresse email du client' },
+          service_requested: { type: 'string', description: 'Le service ou produit recherché' }
+        },
+        required: ['service_requested']
+      }
+    }
+  }
+];
+
+async function executeToolCall(companyId, phoneNumber, toolCall) {
+  const functionName = toolCall.function.name;
+  const args = JSON.parse(toolCall.function.arguments);
+
+  if (functionName === 'save_lead_info') {
+    try {
+      await supabase.from('leads').insert({
+        company_id: companyId,
+        phone_number: phoneNumber,
+        name: args.client_name || null,
+        email: args.email || null,
+        service: args.service_requested,
+        created_at: new Date()
+      });
+      console.log(`📌 Lead enregistré pour [Company ${companyId}] - ${phoneNumber}`);
+      return "Information enregistrée avec succès.";
+    } catch (err) {
+      console.error("Erreur enregistrement lead:", err.message);
+      return "Erreur lors de l'enregistrement.";
+    }
+  }
+  return "Action exécutée.";
+}
+
+// ==================== MIDDLEWARE D'AUTHENTIFICATION ====================
 function authMiddleware(req, res, next) {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -192,13 +264,9 @@ app.post('/webhook', async (req, res) => {
     const message = value?.messages?.[0];
     const phoneNumberId = value?.metadata?.phone_number_id;
 
-    if (!message) {
-      return;
-    }
+    if (!message) return;
 
-    if (processedMessageIds.has(message.id)) {
-      return;
-    }
+    if (processedMessageIds.has(message.id)) return;
     processedMessageIds.add(message.id);
 
     const company = await getCompanyByPhoneNumberId(phoneNumberId);
@@ -217,7 +285,7 @@ app.post('/webhook', async (req, res) => {
     }
 
     const userText = message.text.body;
-    console.log(`📩 [${company.name}] Message reçu de ${from}: ${userText}`);
+    console.log(`📩 [${company.name}] (${company.plan || 'BASIC'}) Message reçu de ${from}: ${userText}`);
 
     await saveMessage(company.id, from, 'client', userText);
 
@@ -247,8 +315,11 @@ async function saveMessage(companyId, phoneNumber, sender, message) {
   }
 }
 
-// ==================== GÉNÉRATION DE RÉPONSE VIA GROQ ====================
+// ==================== GÉNÉRATION DE RÉPONSE VIA GROQ (3 OFFRES) ====================
 async function generateAIResponse(company, userId, userMessage) {
+  const userPlan = (company.plan || 'BASIC').toUpperCase();
+
+  // 1. Récupération de l'historique de conversation
   const { data: history, error } = await supabase
     .from('messages')
     .select('sender, message')
@@ -257,9 +328,7 @@ async function generateAIResponse(company, userId, userMessage) {
     .order('created_at', { ascending: false })
     .limit(20);
 
-  if (error) {
-    console.error('Erreur lecture historique Supabase:', error.message);
-  }
+  if (error) console.error('Erreur lecture historique Supabase:', error.message);
 
   const recentHistory = (history || [])
     .reverse()
@@ -268,37 +337,146 @@ async function generateAIResponse(company, userId, userMessage) {
       content: m.message
     }));
 
-  recentHistory.push({ role: 'user', content: userMessage });
+  let systemPrompt = company.business_prompt || `Tu es l'assistant virtuel de ${company.name}. Réponds de façon concise et professionnelle.`;
 
-  const systemPrompt = company.business_prompt ||
-    `Tu es l'assistant virtuel de ${company.name}. Réponds en français, de façon concise et professionnelle.`;
+  // -------------------------------------------------------------
+  // CAS 1 : OFFRE BASIC (Chatbot FAQ basique + Lead Capture simple)
+  // -------------------------------------------------------------
+  if (userPlan === 'BASIC') {
+    recentHistory.push({ role: 'user', content: userMessage });
 
-  try {
-    const response = await axios.post(
-      'https://api.groq.com/openai/v1/chat/completions',
-      {
-        model: 'llama-3.3-70b-versatile',
-        messages: [
-          { role: 'system', content: systemPrompt },
-          ...recentHistory
-        ],
-        temperature: 0.7,
-        max_tokens: 300
-      },
-      {
-        headers: {
-          'Authorization': `Bearer ${GROQ_API_KEY}`,
-          'Content-Type': 'application/json'
+    try {
+      const response = await axios.post(
+        'https://api.groq.com/openai/v1/chat/completions',
+        {
+          model: 'llama-3.3-70b-versatile',
+          messages: [{ role: 'system', content: systemPrompt }, ...recentHistory],
+          temperature: 0.7,
+          max_tokens: 300
+        },
+        {
+          headers: {
+            'Authorization': `Bearer ${GROQ_API_KEY}`,
+            'Content-Type': 'application/json'
+          }
         }
-      }
-    );
-
-    return response.data.choices[0].message.content;
-
-  } catch (error) {
-    console.error('Erreur Groq:', error.response?.data || error.message);
-    return "Désolé, je rencontre un problème technique. Un membre de notre équipe vous répondra bientôt 🙏";
+      );
+      return response.data.choices[0].message.content;
+    } catch (err) {
+      console.error('Erreur Groq (BASIC):', err.response?.data || err.message);
+      return "Désolé, je rencontre un problème technique. Un membre de notre équipe vous répondra bientôt 🙏";
+    }
   }
+
+  // -------------------------------------------------------------
+  // CAS 2 : OFFRE STANDARD (RAG + Base de connaissances Supabase)
+  // -------------------------------------------------------------
+  if (userPlan === 'STANDARD') {
+    const ragContext = await getRagContext(company.id, userMessage);
+    if (ragContext) {
+      systemPrompt += `\n\n[INFORMATIONS DE LA BASE DE CONNAISSANCES]:\n${ragContext}`;
+    }
+
+    recentHistory.push({ role: 'user', content: userMessage });
+
+    try {
+      const response = await axios.post(
+        'https://api.groq.com/openai/v1/chat/completions',
+        {
+          model: 'llama-3.3-70b-versatile',
+          messages: [{ role: 'system', content: systemPrompt }, ...recentHistory],
+          temperature: 0.4,
+          max_tokens: 400
+        },
+        {
+          headers: {
+            'Authorization': `Bearer ${GROQ_API_KEY}`,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+      return response.data.choices[0].message.content;
+    } catch (err) {
+      console.error('Erreur Groq (STANDARD):', err.response?.data || err.message);
+      return "Désolé, je rencontre un problème technique. Un membre de notre équipe vous répondra bientôt 🙏";
+    }
+  }
+
+  // -------------------------------------------------------------
+  // CAS 3 : OFFRE PREMIUM / PRO (RAG + Tool Calling / Function Calling + Multi-langue)
+  // -------------------------------------------------------------
+  if (userPlan === 'PREMIUM' || userPlan === 'PRO') {
+    const ragContext = await getRagContext(company.id, userMessage);
+    if (ragContext) {
+      systemPrompt += `\n\n[INFORMATIONS DE LA BASE DE CONNAISSANCES]:\n${ragContext}`;
+    }
+    systemPrompt += `\n\n[INSTRUCTION AVANCÉE]: Détecte la langue de l'utilisateur et réponds toujours dans sa langue. Tu as accès à des outils automatiques si le client fournit des informations importantes.`;
+
+    recentHistory.push({ role: 'user', content: userMessage });
+
+    try {
+      const payload = {
+        model: 'llama-3.3-70b-versatile',
+        messages: [{ role: 'system', content: systemPrompt }, ...recentHistory],
+        tools: premiumTools,
+        tool_choice: 'auto',
+        temperature: 0.3,
+        max_tokens: 500
+      };
+
+      const response = await axios.post(
+        'https://api.groq.com/openai/v1/chat/completions',
+        payload,
+        {
+          headers: {
+            'Authorization': `Bearer ${GROQ_API_KEY}`,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+
+      const responseMessage = response.data.choices[0].message;
+
+      // Si l'IA décide d'exécuter un Tool (Function Calling)
+      if (responseMessage.tool_calls && responseMessage.tool_calls.length > 0) {
+        for (const toolCall of responseMessage.tool_calls) {
+          await executeToolCall(company.id, userId, toolCall);
+        }
+
+        // Relance après exécution de l'outil pour formuler la réponse finale au client
+        recentHistory.push(responseMessage);
+        recentHistory.push({
+          role: 'tool',
+          tool_call_id: responseMessage.tool_calls[0].id,
+          content: 'Outil exécuté avec succès.'
+        });
+
+        const finalResponse = await axios.post(
+          'https://api.groq.com/openai/v1/chat/completions',
+          {
+            model: 'llama-3.3-70b-versatile',
+            messages: [{ role: 'system', content: systemPrompt }, ...recentHistory]
+          },
+          {
+            headers: {
+              'Authorization': `Bearer ${GROQ_API_KEY}`,
+              'Content-Type': 'application/json'
+            }
+          }
+        );
+
+        return finalResponse.data.choices[0].message.content;
+      }
+
+      return responseMessage.content;
+
+    } catch (err) {
+      console.error('Erreur Groq (PREMIUM):', err.response?.data || err.message);
+      return "Désolé, je rencontre un problème technique. Un membre de notre équipe vous répondra bientôt 🙏";
+    }
+  }
+
+  return "Désolé, votre formule de service nécessite une configuration.";
 }
 
 // ==================== ENVOI DE MESSAGE WHATSAPP ====================
@@ -327,7 +505,7 @@ async function sendWhatsAppMessage(company, to, text) {
 
 // ==================== ROUTE DE SANTÉ ====================
 app.get('/', (req, res) => {
-  res.send('🤖 Agent WhatsApp SMART AUTOMATION - En ligne (multi-clients, mémoire persistante, dashboard sécurisé)');
+  res.send('🤖 Agent WhatsApp SMART AUTOMATION - En ligne (multi-clients, multi-offres, mémoire persistante)');
 });
 
 app.listen(PORT, () => {
