@@ -1,18 +1,20 @@
 {
   "name": "whatsapp-ai-agent",
   "version": "1.0.0",
-  "description": "Agent WhatsApp IA avec Groq - SMART AUTOMATION",
+  "description": "Agent WhatsApp IA avec Groq (Multi-offres BASIC, STANDARD, PREMIUM) - SMART AUTOMATION",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "dev": "node --watch server.js"
   },
   "dependencies": {
-    "express": "^4.19.2",
-    "axios": "^1.7.2",
-    "dotenv": "^16.4.5",
     "@supabase/supabase-js": "^2.45.0",
+    "axios": "^1.7.2",
     "bcryptjs": "^2.4.3",
-    "jsonwebtoken": "^9.0.2",
-    "cors": "^2.8.5"
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "groq-sdk": "^0.7.0",
+    "jsonwebtoken": "^9.0.2"
   }
 }
