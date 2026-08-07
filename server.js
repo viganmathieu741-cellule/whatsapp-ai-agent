@@ -53,7 +53,6 @@ async function getCompanyByPhoneNumberId(phoneNumberId) {
 // ==================== RECHERCHE RAG SUPABASE (STANDARD & PREMIUM) ====================
 async function getRagContext(companyId, queryText) {
   try {
-    // Si tu utilises des embeddings Supabase pgvector avec la fonction RPC match_documents
     const { data: docs, error } = await supabase.rpc('match_documents', {
       query_text: queryText,
       match_count: 3,
@@ -61,7 +60,6 @@ async function getRagContext(companyId, queryText) {
     });
 
     if (error || !docs || docs.length === 0) {
-      // Fallback simple si la RPC n'est pas configurée : recherche textuelle basique
       const { data: fallbackDocs } = await supabase
         .from('documents')
         .select('content')
@@ -403,30 +401,28 @@ async function generateAIResponse(company, userId, userMessage) {
   }
 
   // -------------------------------------------------------------
-  // CAS 3 : OFFRE PREMIUM / PRO (RAG + Tool Calling / Function Calling + Multi-langue)
+  // CAS 3 : OFFRE PREMIUM / PRO (RAG + Tool Calling + Multi-langue)
   // -------------------------------------------------------------
   if (userPlan === 'PREMIUM' || userPlan === 'PRO') {
     const ragContext = await getRagContext(company.id, userMessage);
     if (ragContext) {
       systemPrompt += `\n\n[INFORMATIONS DE LA BASE DE CONNAISSANCES]:\n${ragContext}`;
     }
-    systemPrompt += `\n\n[INSTRUCTION AVANCÉE]: Détecte la langue de l'utilisateur et réponds toujours dans sa langue. Tu as accès à des outils automatiques si le client fournit des informations importantes.`;
+    systemPrompt += `\n\n[INSTRUCTION AVANCÉE]: Détecte la langue de l'utilisateur et réponds toujours dans sa langue.`;
 
     recentHistory.push({ role: 'user', content: userMessage });
 
     try {
-      const payload = {
-        model: 'llama-3.3-70b-versatile',
-        messages: [{ role: 'system', content: systemPrompt }, ...recentHistory],
-        tools: premiumTools,
-        tool_choice: 'auto',
-        temperature: 0.3,
-        max_tokens: 500
-      };
-
       const response = await axios.post(
         'https://api.groq.com/openai/v1/chat/completions',
-        payload,
+        {
+          model: 'llama-3.3-70b-versatile',
+          messages: [{ role: 'system', content: systemPrompt }, ...recentHistory],
+          tools: premiumTools,
+          tool_choice: 'auto',
+          temperature: 0.3,
+          max_tokens: 500
+        },
         {
           headers: {
             'Authorization': `Bearer ${GROQ_API_KEY}`,
@@ -437,38 +433,23 @@ async function generateAIResponse(company, userId, userMessage) {
 
       const responseMessage = response.data.choices[0].message;
 
-      // Si l'IA décide d'exécuter un Tool (Function Calling)
+      // Exécuter l'outil si Groq renvoie un tool_call structuré
       if (responseMessage.tool_calls && responseMessage.tool_calls.length > 0) {
         for (const toolCall of responseMessage.tool_calls) {
           await executeToolCall(company.id, userId, toolCall);
         }
-
-        // Relance après exécution de l'outil pour formuler la réponse finale au client
-        recentHistory.push(responseMessage);
-        recentHistory.push({
-          role: 'tool',
-          tool_call_id: responseMessage.tool_calls[0].id,
-          content: 'Outil exécuté avec succès.'
-        });
-
-        const finalResponse = await axios.post(
-          'https://api.groq.com/openai/v1/chat/completions',
-          {
-            model: 'llama-3.3-70b-versatile',
-            messages: [{ role: 'system', content: systemPrompt }, ...recentHistory]
-          },
-          {
-            headers: {
-              'Authorization': `Bearer ${GROQ_API_KEY}`,
-              'Content-Type': 'application/json'
-            }
-          }
-        );
-
-        return finalResponse.data.choices[0].message.content;
       }
 
-      return responseMessage.content;
+      let content = responseMessage.content || "";
+
+      // Nettoyer les balises XML brutes si le modèle les injecte dans le texte
+      content = content.replace(/<function=.*?>.*?<\/function>/gs, '').trim();
+
+      if (!content) {
+        content = "Merci pour ces informations, c'est bien noté ! Comment puis-je vous aider d'autre ?";
+      }
+
+      return content;
 
     } catch (err) {
       console.error('Erreur Groq (PREMIUM):', err.response?.data || err.message);
